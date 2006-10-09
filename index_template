@@ -1,0 +1,168 @@
+[%
+   DEFAULT title = 'Index of images...';
+   DEFAULT images_in_row = 3;
+   DEFAULT reel = 1;
+   DEFAULT cellpadding = 3;
+%]
+
+<html>
+<head>
+   <meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+   <link rel="stylesheet" type="text/css" href="pgal.css">
+   <title>[% title %]</title>
+</head>
+<body>
+   <h1>[% title %]</h1>
+
+   [% 
+      IF images.size() ;
+      SET stuff =  images.slice(0) ;
+   %]
+   <a href="../index.html">Parent album</a>
+   <div class="center">
+   [% 
+      WHILE stuff.size > 0 ;
+         PROCESS photo_line line = stuff.splice(0, images_in_row) ;
+      END ;
+   %]
+   </div>
+   [% END %]
+
+   [% 
+      IF subalbums.size() ;
+      SET stuff = subalbums.slice(0) ;
+   %]
+   <h2>Subalbums</h2>
+   <div class="center">
+   [% 
+      WHILE stuff.size > 0 ;
+         PROCESS subalbum_line line = stuff.splice(0, images_in_row) ;
+      END ;
+   %]
+   </div>
+   [% END %]
+   <p class="small">Created with <a href="http://pgal.polettix.it/">pgal</a>
+</body>
+</html>
+
+[% 
+   BLOCK photo_line ;
+   SET columns = 2 + line.size
+%]
+<table border=0 cellspacing=0 cellpadding=[% cellpadding %]>
+[% IF reel %]
+<tr><td class="tiled" height="21" colspan="[% columns %]"></td></tr>
+[% END %]
+<tr>
+<td class="thumb">&nbsp;</td>
+[% FOREACH image = line %]
+[% 
+   IF image.caption ;
+      caption = image.caption ;
+   ELSE ;
+      caption = image.file ;
+   END
+%]
+   <td class="thumb">
+      <a href="[% image.url %]"><img src="[% image.thumb.file %]"
+         style="border-width: 0" alt="[% caption %]" title="[% caption %]" 
+         width="[% image.thumb.width %]" height="[% image.thumb.height %]"
+      ></a>
+   </td>
+[% END %]
+<td class="thumb">&nbsp;</td>
+</tr>
+[% IF reel %]
+<tr><td class="tiled" height="21" colspan="[% columns %]"></td></tr>
+[% END %]
+[% IF config.caption_in_index %]
+<tr>
+<td class="small">&nbsp;</td>
+[% FOREACH image = line %]
+[% 
+   IF image.caption ;
+      caption = image.caption ;
+   ELSE ;
+      caption = image.file ;
+   END
+%]
+   <td class="small">
+         [% 
+            GET caption | html ;
+            IF image.caption_addition ;
+               GET "<br />($image.caption_addition)";
+            END ;
+         %]
+   </td>
+[% END %]
+<td class="small">&nbsp;</td>
+
+</tr>
+[% END %]
+</table>
+<br />
+[% END %]
+
+
+[% 
+   BLOCK subalbum_line ;
+   SET columns = 2 + line.size
+%]
+<table border=0 cellspacing=0 cellpadding=[% cellpadding %]>
+[% IF reel %]
+<tr><td class="tiled" height="21" colspan="[% columns %]"></td></tr>
+[% END %]
+<tr>
+<td class="thumb">&nbsp;</td>
+[% FOREACH image = line %]
+[% 
+   IF image.caption ;
+      caption = image.caption ;
+   ELSIF image.captions.title ;
+      caption = image.captions.title ;
+   ELSE ;
+      caption = image.directory ;
+   END
+%]
+   <td class="thumb">
+      <a href="[% image.url %]"><img src="[% image.subthumb.file %]"
+         style="border-width: 0" alt="[% caption %]" title="[% caption %]" 
+         width="[% image.subthumb.width %]" height="[% image.subthumb.height %]"
+      ></a>
+   </td>
+[% END %]
+<td class="thumb">&nbsp;</td>
+</tr>
+[% IF reel %]
+<tr><td class="tiled" height="21" colspan="[% columns %]"></td></tr>
+[% END %]
+[% IF 1 || config.caption_in_index %]
+<tr>
+<td class="small">&nbsp;</td>
+[% FOREACH image = line %]
+[% 
+   IF image.caption ;
+      caption = image.caption ;
+   ELSIF image.captions.title ;
+      caption = image.captions.title ;
+   ELSE ;
+      caption = image.directory ;
+   END
+%]
+   <td class="small">
+         [% 
+            GET caption | html ;
+            IF image.caption_addition ;
+               GET "<br />($image.caption_addition)";
+            END ;
+         %]
+   </td>
+[% END %]
+<td class="small">&nbsp;</td>
+
+</tr>
+[% END %]
+</table>
+<br />
+[% END %]
+

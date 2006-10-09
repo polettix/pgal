@@ -1,0 +1,37 @@
+<html>
+<head>
+   <meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+   <link rel="stylesheet" type="text/css" href="pgal.css">
+   <title>[% title %]</title>
+</head>
+<body>
+<p class="center">[% PROCESS navigator %]</p>
+<div class="center">
+<table bgcolor="#ffffff" cellspacing="0" cellpadding="4">
+<tr><td class="slide">
+<a href="[% this.file %]"
+><img src="[% this.scaled.file %]" 
+   width="[% this.scaled.width %]" height="[% this.scaled.height %]"
+   alt="[% this.file %]" title="[% this.file %]"
+   style="border-width: 0"
+></a>
+</td></tr>
+</table>
+</div>
+<p class="center">
+([% this.id %]/[% images.size %]) &nbsp;
+[% IF this.caption %]
+<p class="center">[% this.caption %]
+[% END %]
+<p class="center">[% PROCESS navigator %]</p>
+</body>
+</html>
+
+[% BLOCK neighbor_link %]
+<a href="[% url %]">[% name | html %]</a>
+[% END %]
+[% BLOCK navigator %]
+[% PROCESS neighbor_link url = index.url name = 'Index' %]&nbsp; &nbsp; &nbsp;   
+[% PROCESS neighbor_link url = previous.url name = '<< Prev' %]&nbsp;&nbsp; 
+[% PROCESS neighbor_link url = following.url name = 'Next >>' %]
+[% END %]

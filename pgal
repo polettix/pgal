@@ -1,0 +1,926 @@
+#!/opt/perl/bin/perl
+use strict;
+use warnings;
+use Carp;
+use Pod::Usage qw( pod2usage );
+use Getopt::Long qw( :config gnu_getopt );
+#use Smart::Comments '###', '####';
+use File::Basename qw( dirname basename );
+use Template;
+use Storable qw( retrieve nstore );
+use Image::Magick;
+use Fatal qw( open chdir opendir );
+use File::Slurp qw( slurp write_file );
+use File::Spec;
+use File::Copy;
+use Term::ProgressBar;
+use Data::Dumper;
+use File::Find::Rule;
+use Cwd;
+
+use version; my $VERSION = qv('0.0.1');
+
+my %config = (
+   history        => 'history',
+   dir            => '.',
+   image_filename => qr/(?ixsm:\A [^.] .* \. (?: jpg | png | gif ) \z)/,
+   video_filename => qr/(?ixsm:\A [^.] .* \. (?: mov | avi | mpg ) \z)/,
+
+   subthumb_height => 120,
+   subthumb_prefix => '.subthumb_',
+
+   thumb_height => 120,
+   thumb_prefix => '.thumb_',
+
+   scaled_heigth => 0,
+   scaled_prefix => '.slide_',
+
+   pgal_dir => '/home/poletti/sviluppo/perl/pgal',
+
+   index_template => '.index_template',
+   index_master   => 'index_template',
+   index_product  => 'index.html',
+
+   slide_template => '.slide_template',
+   slide_master   => 'slide_template',
+   slide_product  => 'slide_%d.html',
+
+   css         => 'pgal.css',
+   master_css  => 'pgal.css',
+   tile        => '.tile.png',
+   master_tile => 'tile.png',
+
+   caption_file       => '.captions',
+   caption_use        => 0,
+   caption_dimensions => 0,
+   caption_size       => 0,
+   caption_in_index   => 0,
+);
+GetOptions(
+   \%config,
+   'usage',
+   'help',
+   'man',
+   'version',
+
+   'thumb_height|thumb-height|y=i',
+   'scaled_height|scaled-heigth|bigy|Y=i',
+   'subthumb_height|subalbum-height|suby|S=i',
+   'force|f',
+
+   'recursive|recurse|r',
+
+   'caption_use|use-captions|c',
+   'caption_full|full-captions|a',
+   'caption_dimensions|caption-dimensions|ad',
+   'caption_size|caption-size|as',
+   'caption_in_index|caption-in-index|u',
+);
+pod2usage("$0 $VERSION") if $config{version};
+pod2usage(-verbose => 99, -sections => 'USAGE') if $config{usage};
+pod2usage(-verbose => 99, -sections => 'USAGE|SYNOPSIS|OPTIONS')
+  if $config{help};
+pod2usage(-verbose => 2) if $config{man};
+
+if ($config{caption_full}) {
+   $config{caption_dimensions} = $config{caption_size} = 1;
+}
+
+#### config: %config
+
+# Script implementation here
+
+traverse($config{dir});
+
+# foreach my $dir (get_subdirectories()) {
+#    print {*STDERR} "\nOperating in $dir\n";
+#    chdir $dir;
+#    pgal_cwd({has_parent => ($dir ne '.')});
+#    chdir $absdir;
+# } ## end foreach my $dir (get_subdirectories...
+
+sub get_subdirectories {
+   return '.' unless $config{recursive};
+   return File::Find::Rule->directory()->in('.');
+}
+
+sub pgal_cwd_ {
+   my $params = shift;
+
+   my %pconfig = load_previous_config();
+   #spoil_previous_config();
+
+   @pconfig{qw( thumb_height scaled_height )} = (0, 0) if $config{force};
+
+   my @images = get_image_list();
+   iterate(\&load_image_info, 'Loading infos', @images);
+   iterate(sub { generate_scaled(shift, 'thumb', \%pconfig) },
+      'Generating thumbnails', @images);
+   iterate(sub { generate_scaled(shift, 'scaled', \%pconfig) },
+      'Generating scaled images', @images);
+
+   my @subalbum_images = get_subalbum_list();
+   iterate(\&load_image_info, 'Loading infos', @subalbum_images);
+   iterate(
+      sub { generate_scaled(shift, 'subthumb', \%pconfig) },
+      'Generating subalbums thumbnails',
+      @subalbum_images
+   );
+
+   print {*STDERR} "Generating index page... ";
+   generate_index($params, \@images, \@subalbum_images);
+   print {*STDERR} "done\n";
+
+   print {*STDERR} "Generating index page... ";
+   generate_pages(@images);
+   print {*STDERR} "done\n";
+
+   print {*STDERR} "Ensuring css and tile files... ";
+   ensure_file($config{css},  $config{master_css});
+   ensure_file($config{tile}, $config{master_tile});
+   print {*STDERR} "done\n";
+
+   print {*STDERR} "Saving configuration for future... ";
+   save_new_config(\%config);
+   print {*STDERR} "done\n";
+} ## end sub pgal_cwd_
+
+sub ensure_file {
+   my ($file, $master) = @_;
+   return if -e $file;
+   File::Copy::copy(File::Spec->catfile(where_am_i(), $master), $file);
+   return;
+} ## end sub ensure_file
+
+sub iterate {
+   my $method  = shift;
+   my $message = shift;
+   my $pbar    =
+     Term::ProgressBar->new(
+      {name => $message, count => scalar @_, remove => 1});
+   my $counter = 0;
+   foreach my $image (@_) {
+      $method->($image);
+      $pbar->update(++$counter);
+   }
+   print {*STDERR} "$message... done\n";
+   return;
+} ## end sub iterate
+
+sub load_image_info {
+   my ($image) = @_;
+   my $magick  = Image::Magick->new();
+   my $idx     = 0;
+   $image->{id} = ++$idx;
+   $image->{url} = sprintf $config{slide_product}, $idx;
+   @{$image}{qw( width height size format )} =
+     $magick->Ping($image->{file});
+
+   my $caption_addition = '';
+   if ($config{caption_dimensions}) {
+      $caption_addition .= $image->{width} . 'x' . $image->{height};
+   }
+   if ($config{caption_size}) {
+      $caption_addition .= ', ' if $caption_addition;
+      $caption_addition .= $image->{size} . ' bytes';
+   }
+   $image->{caption_addition} .= $caption_addition;
+} ## end sub load_image_info
+
+sub page_generator {
+   my @images = @_;
+   my $template = get_template(@config{qw( slide_template slide_master )});
+   my $tt       = Template->new();
+   return sub {
+      my $i = shift;
+      return $tt->process(
+         \$template,
+         {
+            config    => \%config,
+            previous  => $images[$i - 1],
+            this      => $images[$i],
+            following => $images[($i + 1) % @images],
+            images    => \@images,
+            index     => {url => $config{index_product}},
+            title     => $images[$i]{file},
+         },
+         $images[$i]{url}
+      );
+   }
+}
+
+sub generate_pages {
+   my @images = @_;
+   #### generate_pages images: @images
+
+   my $template = get_template(@config{qw( slide_template slide_master )});
+   my $tt       = Template->new();
+
+   for my $i (0 .. $#images) {
+      $tt->process(
+         \$template,
+         {
+            config    => \%config,
+            previous  => $images[$i - 1],
+            this      => $images[$i],
+            following => $images[($i + 1) % @images],
+            images    => \@images,
+            index     => {url => $config{index_product}},
+            title     => $images[$i]{file},
+         },
+         $images[$i]{url}
+      );
+   } ## end for my $i (0 .. $#images)
+} ## end sub generate_pages
+
+sub generate_index {
+   my ($data) = @_;
+   my $template = get_template(@config{qw( index_template index_master )});
+   my $tt       = Template->new();
+   $tt->process(
+      \$template,
+      {
+         config    => \%config,
+         %$data
+      },
+      $config{index_product}
+     )
+     || die $tt->error();
+} ## end sub generate_index
+
+sub get_template {
+   my ($filename, $master) = @_;
+   return slurp $filename if -e $filename;
+   my $template = slurp(File::Spec->catfile(where_am_i(), $master));
+   write_file $filename, $template;
+   return $template;
+} ## end sub get_template
+
+sub generate_scaled {
+   my ($image, $type, $pconfig) = @_;
+
+   # Some handy constants, set defaults to whole image
+   my $wname = $type . '_width';
+   my $hname = $type . '_height';
+   @{$image}{($wname, $hname, $type)} = @{$image}{qw( width height file )};
+   return unless $config{$hname};
+
+   # Ok, we actually have to cope with a different file
+   $image->{$type} = $config{$type . '_prefix'} . basename($image->{file});
+
+   # Establish new sizes
+   my $nh = $config{$hname};
+   my $nw = int($image->{width} * $nh / $image->{height});
+   @{$image}{($wname, $hname)} = ($nw, $nh);
+
+   # Return immediately if a previous version "should" be already present
+   return
+     if defined $pconfig->{$hname}
+     && $pconfig->{$hname} == $config{$hname}
+     && -e $image->{$type};
+
+   # Here we have to actually load the image, scale it and save to the
+   # scaled version file
+   my $retval;
+   my $magick = Image::Magick->new();
+   $retval = $magick->Read($image->{file}) and die $retval;
+   $retval = $magick->Resize(width => $nw, height => $nh) and die $retval;
+   $retval = $magick->Write($image->{$type}) and die $retval;
+
+   return 1;
+} ## end sub generate_scaled
+
+sub get_subalbum_list {
+   return map {
+      chdir $_;
+      my $rep;
+      if (my @images = get_image_list()) {
+         if (exists $images[0]->{separator}) {    # From caption
+            for my $image (@images) {
+               next unless $image->{separator} eq 'xxxx';
+               $rep = $image;
+               last;
+            }
+         } ## end if (exists $images[0]->...
+         $rep = $images[rand @images] unless defined $rep;
+         $rep->{file}         = File::Spec->catfile($_, $rep->{file});
+         $rep->{subalbum_dir} = $_;
+         $rep->{caption}      = $_;
+         $rep->{subalbum_url} =
+           File::Spec->catfile($_, $config{index_product});
+      } ## end if (my @images = get_image_list...
+      chdir '..';
+      defined $rep ? $rep : ();
+     }
+     grep { $_ ne '.' }
+     File::Find::Rule->directory()->maxdepth(1)->in('.');
+} ## end sub get_subalbum_list
+
+sub get_image_list {
+   my @filelist;
+   if ($config{caption_use} && -e $config{caption_file}) {
+      @filelist = map {
+         my ($file, $separator, $caption) = /\A
+            (\S+) # File name, must start at the beginning of line
+            \s+   # ehr, couldn't be different :)
+            ( ---- | xxxx ) # separator, x marks the choice...
+            \s* (.*?) \s*  # optional caption, trimmed
+            \z/msx;
+         {
+            file      => $file,
+            separator => $separator,
+            caption   => $caption,
+         }
+        } grep { /\A [^#] \S* \s+ (?: ---- | xxxx )/msx }
+        slurp $config{caption_file};
+   } ## end if ($config{caption_use...
+   else {
+      opendir my $dh, '.';
+      @filelist = map { {file => $_, caption => ''} }
+        grep { /$config{image_filename}/ }
+        sort readdir $dh;
+      save_captions(@filelist) if $config{caption_use};
+   } ## end else [ if ($config{caption_use...
+   return @filelist;
+} ## end sub get_image_list
+
+sub save_captions {
+   open my $fh, '>', $config{caption_file};
+   print {$fh} << 'END_OF_HEADER';
+# Put your captions here, after the '----'. Leave the '-----' where they are.
+# Every line that starts with a space or a '#' is a comment. You'd better
+# use '#'. You can comment out images or change the order, if you want.
+
+END_OF_HEADER
+   print {$fh} "$_->{file} ---- $_->{caption}\n" foreach @_;
+   return;
+} ## end sub save_captions
+
+sub where_am_i {
+   return $config{pgal_dir};
+   return dirname($0);
+}
+
+sub load_previous_config {
+   return unless -e $config{history};
+   return %{retrieve $config{history}};
+}
+
+sub spoil_previous_config {
+   save_new_config({});
+}
+
+sub save_new_config {
+   return nstore(shift, $config{history});
+}
+
+sub pgal_cwd {
+   my ($captions) = @_;
+
+   my %pconfig = load_previous_config();
+   spoil_previous_config();
+
+   # Work on local images
+   my $images = $captions->{images};
+   iterate(image_info_loader(),    'Loading infos',    @$images);
+   iterate(image_slide_assigner(), 'Assigning slides', @$images);
+   iterate(image_scaler('thumb', \%pconfig),
+      'Generating thumbnails', @$images);
+   iterate(image_scaler('scaled', \%pconfig),
+      'Generating scaled images', @$images);
+
+   # Work on videos - TODO
+
+   # Work on subalbums
+   my $subalbums = $captions->{subalbums};
+   iterate(image_info_loader(), 'Loading infos', @$subalbums);
+   iterate(image_scaler('subthumb', \%pconfig),
+      'Generating subalbums thumbnails', @$subalbums);
+
+   ### captions: $captions
+
+
+   # Generate index page
+   print {*STDERR} "Generating index page... ";
+   generate_index($captions);
+   print {*STDERR} "done\n";
+
+   iterate(page_generator(@$images), 'Generating pages', 0 .. $#{$images});
+
+   print {*STDERR} "Ensuring css and tile files... ";
+   ensure_file($config{css},  $config{master_css});
+   ensure_file($config{tile}, $config{master_tile});
+   print {*STDERR} "done\n";
+
+   print {*STDERR} "Saving configuration for future... ";
+   save_new_config(\%config);
+   print {*STDERR} "done\n";
+} ## end sub pgal_cwd
+
+sub get_preferred {
+   my ($captions) = @_;
+   return $captions->{preferred} ||= do {
+      my @elements =
+        map { @{$captions->{$_} || []} } qw( images videos subalbums );
+      $elements[rand @elements];
+   };
+} ## end sub get_preferred
+
+sub traverse {
+   my ($directory, $dont_regenerate) = @_;
+   my $previous_directory = getcwd();
+   chdir $directory;
+   ### now in: getcwd()
+
+   my %captions = get_captions($config{caption_file});
+
+      foreach my $subdir (@{$captions{subalbums}}) {
+         # Set url
+         $subdir->{url} = File::Spec->catfile($subdir->{directory},
+            $config{index_product});
+
+         # Assess captions for subalbums
+         my $subcaptions = traverse($subdir->{directory}, ! $config{recursive});
+         $subdir->{captions} = $subcaptions;
+
+         # Establish representative
+         my $preferred = get_preferred($subcaptions);
+         $subdir->{file} =
+           File::Spec->catdir($subdir->{directory}, $preferred->{file});
+      } ## end foreach my $subdir (@{$captions...
+
+   # Here, I traversed the whole sub-tree
+   print {*STDERR} "\nWorking in $directory\n";
+   pgal_cwd(\%captions) unless $dont_regenerate;
+
+   # Step back, and return captions' tree so far
+   chdir $previous_directory;
+   return %captions if wantarray;
+   return \%captions;
+} ## end sub traverse
+
+sub get_captions {
+   my ($filename) = @_;
+   return load_captions($filename) if -e $filename;
+   return create_captions($filename);
+}
+
+sub load_captions {
+   my ($filename) = @_;
+   open my $fh, '<', $filename;
+
+   my %captions = (filename => $filename, directory => dirname($filename));
+   my $accepting = 'images';
+   while (<$fh>) {
+      next if /\A \s* \#/mxs;
+      if (/\A\s* Title: \s* (.*?) \s*\z/imxs) {
+         $captions{title} = $1;
+      }
+      elsif (/\A\s* ( images | videos | subalbums ) : \s*\z/imxs) {
+         $accepting = lc($1);
+      }
+      elsif (
+         /\A\s*
+              (.+)                 # file name, no spaces please
+              \s+ ( ---- | xxxx )  # separator, marks preferred
+              \s* (.*?) \s*        # trimmed caption
+              \z/mxs
+        )
+      {
+         my $item = create_item($accepting, $1, $2 eq 'xxxx', $3);
+         push @{$captions{$accepting}}, $item;
+         $captions{preferred} = $item if $item->{is_preferred};
+      } ## end elsif (/\A\s* )
+
+   } ## end while (<$fh>)
+   close $fh;
+
+   return %captions if wantarray;
+   return \%captions;
+} ## end sub load_captions
+
+sub create_item {
+   my ($type, $file, $is_preferred, $caption) = @_;
+   return {
+      ($type eq 'subalbums' ? 'directory' : 'file') => $file,
+      resource => $file,
+      is_preferred => $is_preferred,
+      caption      => $caption,
+   };
+} ## end sub create_item
+
+sub create_captions {
+   my ($filename) = @_;
+
+   # Captions file assumed to live with images
+   my (@images, @videos, @subdirs);
+   my %captions = (title => 'Images in album');
+   opendir my $dh, dirname($filename);
+   for my $file (readdir $dh) {
+      next if $file eq '.' || $file eq '..';
+      my $type_of_stuff =
+          -d $file ? 'subalbums'
+        : $file =~ /$config{image_filename}/ ? 'images'
+        : $file =~ /$config{video_filename}/ ? 'videos'
+        : next;
+      push @{$captions{$type_of_stuff}},
+        create_item($type_of_stuff, $file, 0, '');
+   } ## end for my $file (readdir $dh)
+   closedir $dh;
+
+   open my $fh, '>', $filename;
+
+   print {$fh} <<'END_OF_CAPTION_PREAMBLE';
+# pgal captions file
+#
+# Put all your captions here, it's simple. You have separate sections for
+# all the stuff, add at your will. If you reorder stuff inside sections,
+# well... they'll be reordered in the output page as well. You can
+# eliminate or comment out images/videos/subalbums to avoid them.
+#
+# Title will be set as title for the album.
+#
+# Put your captions after the '----'. Leave the '-----' where they are,
+# except if you want to mark the album's preferred item, that will be
+# used by parent albums. In this case, use 'xxxx' instead of '----'.
+#
+# Good work!
+
+END_OF_CAPTION_PREAMBLE
+   print {$fh} "Title: $captions{title}\n\n";
+
+   for my $type_of_stuff (qw( images videos subalbums )) {
+      print {$fh} "\n$type_of_stuff:\n";
+      print {$fh} "\t$_->{resource} ---- \n" 
+         foreach @{$captions{$type_of_stuff}};
+   }
+
+   close $fh;
+
+   return %captions if wantarray;
+   return \%captions;
+} ## end sub create_captions
+
+sub image_info_loader {    # Returns a callback to load image info
+   my $magick = Image::Magick->new();
+   return sub {            # Expects reference to image data
+      my $image = shift;
+      @{$image}{qw( width height size format )} =
+        $magick->Ping($image->{file});
+     }
+} ## end sub image_info_loader
+
+sub image_slide_assigner {
+   my $idx = 0;
+   return sub {
+      my $image = shift;
+      $image->{id} = ++$idx;
+      $image->{url} = sprintf $config{slide_product}, $idx;
+     }
+} ## end sub image_slide_assigner
+
+sub is_newer {
+   my ($product, $original) = @_;
+   my $ptime = (stat $product)[9];
+   my $otime = (stat $original)[9];
+   return $ptime >= $otime;
+   return 1;
+} ## end sub is_newer
+
+sub image_scaler {
+   my ($type, $pconfig) = @_;
+   my $hname = $type . '_height';
+   my $new_h = $config{$hname};
+
+   return sub {    # Saves scaled image in current directory
+      my $image = shift;
+      return unless -f $image->{file};
+
+      # Some handy constants, set defaults to whole image
+      @{$image->{$type}}{qw( width height file )} =
+        @{$image}{qw( width height file )};
+      return unless $config{$hname};
+
+      # Ok, we actually have to cope with a different file
+      $image->{$type}{file} =
+        $config{$type . '_prefix'} . basename($image->{file});
+
+      # Establish new size (new height is equal for all, see above
+      my $new_w = int($image->{width} * $new_h / $image->{height});
+      @{$image->{$type}}{qw( width height )} = ($new_w, $new_h);
+
+     # Return immediately if a previous version "should" be already present
+      return
+        if defined $pconfig->{$hname}
+        && $pconfig->{$hname} == $config{$hname}
+        && -e $image->{$type}{file}
+        && is_newer($image->{$type}{file}, $image->{file})
+        && !$config{force};
+
+      # Here we have to actually load the image, scale it and save to the
+      # scaled version file
+      my $retval;
+      my $magick = Image::Magick->new();
+      $retval = $magick->Read($image->{file}) and die $retval;
+      $retval = $magick->Resize(width => $new_w, height => $new_h)
+        and die $retval;
+      $retval = $magick->Write($image->{$type}{file}) and die $retval;
+
+      return 1;
+     } ## end sub
+} ## end sub image_scaler
+__END__
+
+=head1 NAME
+
+pgal - Photo gallery generator
+
+
+=head1 VERSION
+
+See version at beginning of script, variable $VERSION.
+
+=head1 SYNOPSIS
+
+   shell$ pgal
+
+   # Thumbnails 150 px height, slides 480 px, with captions
+   shell$ pgal -y 150 --bigy 480 -c
+
+   # Put image size and dimensions, in index as well
+   shell$ pgal -a -u
+
+=head1 USAGE
+
+   pgal [--usage] [--help] [--man] [--version] [-c|--use-captions]
+        [-y|--thumb-height] [--bigy|--scaled-height] [-f|--force]
+        [-a|--full-captions] [-ad|--caption-dimensions]
+        [-as|--caption-size] [-u|--caption-in-index]
+
+  
+=head1 DESCRIPTION
+
+This script is intended to be a replacement for igal
+(L<http://www.stanford.edu/~epop/igal/>). What's wrong with igal? Nothing.
+I love it. I love it so much that I wanted to replicate it.
+
+Ok, there's more. First of all, not all the features are implemented.
+Most of them will - probably - but I was interested in a few of them.
+Basically, I only need a few of them.
+Moreover, the command line interface is not the same. igal uses a single
+hyphen for long options, too (like C<-bigy>), while I use two hyphens.
+
+But for things that miss, some other features have crept in:
+
+=over
+
+=item -
+
+it uses a real templating system: Template::Toolkit;
+
+=item -
+
+it does all operations within the script, using Image:Magick, instead
+of calling external programs
+
+=back
+
+The first bullet is probably the most important. The user has complete
+control over the aspect of the gallery. Not only it's possible to change the
+surrounding text: you can fully redesign the page if you want. Thanks to
+Template::Toolkit, you can play with the template and find the solution
+you like. One possible application? Adding a thumbnail preview of the previous
+and following photo while looking at a slide can be done in a snap.
+
+Don't get me wrong, I really love igal. But today we have TT2, and...
+it's being funny.
+
+=head1 OPTIONS
+
+=over
+
+=item -a | --full-captions
+
+Add both image dimensions (width x height) and file size in caption.
+Implies both -ad and -as.
+
+=item -ad | --caption-dimensions
+
+Add image dimensions (width x height) in caption.
+
+=item -as | --caption-size
+
+Add image file size in caption.
+
+=item --bigy <height>
+
+Set height of images inside slide pages. Scaling preserves original
+files and aspect ratio.
+
+=item -c | --use-capions
+
+Use the .captions file to load image captions. The file itself is used
+to enable or disable images.
+
+=item -f | --force
+
+Force regeneration of thumbnails and scaled images for slides. In normal
+conditions, two successive invocations of the script do not trigger the
+same actions, in particular only html files are regenerated unless this
+option is given.
+
+=item --help
+
+print a somewhat more verbose help, showing usage, this description of
+the options and some examples from the synopsis.
+
+=item --man
+
+print out the full documentation for the script.
+
+=item -u | --caption-in-index
+
+Put captions into the index file (normally they only live in the slide
+pages).
+
+=item --usage
+
+print a concise usage line and exit.
+
+=item --version
+
+print the version of the script.
+
+=item -y <height> | --thumb-height=<height>
+
+Set height of thumbnails. Scaling preserves original files and aspect
+ratio. Defaults to 120.
+
+=back
+
+=head1 DIAGNOSTICS
+
+Functions C<open()>, C<chdir()> and C<opendir()> are put under Fatal's
+wing, so you could be hit wherever these functions are used.
+
+Errors in Template::Toolkit C<process()> method yield to a fatal
+error, whose content depends on the TT2 error, which is reported
+verbatim.
+
+Errors in Image::Magick follow a similar fate. You can C<die()> with the
+C<Read()>, C<Resize()> and C<Write()> methods.
+
+
+=head1 CONFIGURATION AND ENVIRONMENT
+
+=for l'autore, da riempire:
+   Una spiegazione completa di qualunque sistema di configurazione
+   utilizzato dallo script, inclusi i nomi e le posizioni dei file di
+   configurazione, il significato di ciascuna variabile di ambiente
+   utilizzata e proprietà che può essere impostata. Queste descrizioni
+   devono anche includere dettagli su eventuali linguaggi di configurazione
+   utilizzati.
+  
+pgal requires no configuration files or environment variables. Well,
+sort of.
+
+pgal uses a series of templates for page generation. If they're present
+in your directory, they are used, so they can surely be considered
+configuration files. If they don't exist, they're created based on
+a master template that resides in the same directory as the script
+itself.
+
+
+=head1 DEPENDENCIES
+
+Take a seat:
+
+=over
+
+=item Pod::Usage
+
+for getting this beautiful documentation;
+
+=item Getopt::Long
+
+guess why?
+
+=item Smart::Comments
+
+for debugging (and feedback) purposes;
+
+=item Data::Dumper
+
+for debugging;
+
+=item File::Basename
+
+=item File::Spec
+
+=item File::Slurp
+
+=item File::Copy
+
+=item Fatal
+
+=item Storable
+
+=item Image::Magick
+
+Basic image routines. You can't install it from CPAN, you'd better
+download ImageMagick and compile PerlMagick by yourself.
+
+=item Template
+
+the Template::Toolkit templating framework
+
+=back
+
+=head1 BUGS AND LIMITATIONS
+
+You bet. At the moment, only the feature that I used on igal are
+implemented.
+
+No bugs have been reported.
+
+Please report any bugs or feature requests through http://rt.cpan.org/
+
+
+=head1 AUTHOR
+
+Flavio Poletti C<flavio@polettix.it>
+
+
+=head1 LICENCE AND COPYRIGHT
+
+Copyright (c) 2006, Flavio Poletti C<flavio@polettix.it>. All rights reserved.
+
+This script is free software; you can redistribute it and/or
+modify it under the same terms as Perl itself. See L<perlartistic>
+and L<perlgpl>.
+
+Questo script è software libero: potete ridistribuirlo e/o
+modificarlo negli stessi termini di Perl stesso. Vedete anche
+L<perlartistic> e L<perlgpl>.
+
+
+=head1 DISCLAIMER OF WARRANTY
+
+BECAUSE THIS SOFTWARE IS LICENSED FREE OF CHARGE, THERE IS NO WARRANTY
+FOR THE SOFTWARE, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN
+OTHERWISE STATED IN WRITING THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES
+PROVIDE THE SOFTWARE "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER
+EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE
+ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE SOFTWARE IS WITH
+YOU. SHOULD THE SOFTWARE PROVE DEFECTIVE, YOU ASSUME THE COST OF ALL
+NECESSARY SERVICING, REPAIR, OR CORRECTION.
+
+IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING
+WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MAY MODIFY AND/OR
+REDISTRIBUTE THE SOFTWARE AS PERMITTED BY THE ABOVE LICENCE, BE
+LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL, INCIDENTAL,
+OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE
+THE SOFTWARE (INCLUDING BUT NOT LIMITED TO LOSS OF DATA OR DATA BEING
+RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A
+FAILURE OF THE SOFTWARE TO OPERATE WITH ANY OTHER SOFTWARE), EVEN IF
+SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGES.
+
+=head1 NEGAZIONE DELLA GARANZIA
+
+Poiché questo software viene dato con una licenza gratuita, non
+c'è alcuna garanzia associata ad esso, ai fini e per quanto permesso
+dalle leggi applicabili. A meno di quanto possa essere specificato
+altrove, il proprietario e detentore del copyright fornisce questo
+software "così com'è" senza garanzia di alcun tipo, sia essa espressa
+o implicita, includendo fra l'altro (senza però limitarsi a questo)
+eventuali garanzie implicite di commerciabilità e adeguatezza per
+uno scopo particolare. L'intero rischio riguardo alla qualità ed
+alle prestazioni di questo software rimane a voi. Se il software
+dovesse dimostrarsi difettoso, vi assumete tutte le responsabilità
+ed i costi per tutti i necessari servizi, riparazioni o correzioni.
+
+In nessun caso, a meno che ciò non sia richiesto dalle leggi vigenti
+o sia regolato da un accordo scritto, alcuno dei detentori del diritto
+di copyright, o qualunque altra parte che possa modificare, o redistribuire
+questo software così come consentito dalla licenza di cui sopra, potrà
+essere considerato responsabile nei vostri confronti per danni, ivi
+inclusi danni generali, speciali, incidentali o conseguenziali, derivanti
+dall'utilizzo o dall'incapacità di utilizzo di questo software. Ciò
+include, a puro titolo di esempio e senza limitarsi ad essi, la perdita
+di dati, l'alterazione involontaria o indesiderata di dati, le perdite
+sostenute da voi o da terze parti o un fallimento del software ad
+operare con un qualsivoglia altro software. Tale negazione di garanzia
+rimane in essere anche se i dententori del copyright, o qualsiasi altra
+parte, è stata avvisata della possibilità di tali danneggiamenti.
+
+Se decidete di utilizzare questo software, lo fate a vostro rischio
+e pericolo. Se pensate che i termini di questa negazione di garanzia
+non si confacciano alle vostre esigenze, o al vostro modo di
+considerare un software, o ancora al modo in cui avete sempre trattato
+software di terze parti, non usatelo. Se lo usate, accettate espressamente
+questa negazione di garanzia e la piena responsabilità per qualsiasi
+tipo di danno, di qualsiasi natura, possa derivarne.
+
+=cut
