@@ -4,6 +4,7 @@ use warnings;
 use Carp;
 use Pod::Usage qw( pod2usage );
 use Getopt::Long qw( :config gnu_getopt );
+
 #use Smart::Comments '###', '####';
 use File::Basename qw( dirname basename );
 use Template;
@@ -27,7 +28,7 @@ my %config = (
    video_filename => qr/(?ixsm:\A [^.] .* \. (?: mov | avi | mpg ) \z)/,
 
    subthumb_height => 120,
-   subthumb_prefix => '.subthumb_',
+   subthumb_prefix => [ qw( counter_prefix .subthumb_ ) , do{ \my $x}],
 
    thumb_height => 120,
    thumb_prefix => '.thumb_',
@@ -69,6 +70,7 @@ GetOptions(
    'force|f',
 
    'recursive|recurse|r',
+   'regenerate|regen|R',
 
    'caption_use|use-captions|c',
    'caption_full|full-captions|a',
@@ -86,293 +88,53 @@ if ($config{caption_full}) {
    $config{caption_dimensions} = $config{caption_size} = 1;
 }
 
+# Honor regeneration request
+%config = (load_previous_config(), %config) if $config{regenerate};
+
 #### config: %config
 
 # Script implementation here
 
 traverse($config{dir});
 
-# foreach my $dir (get_subdirectories()) {
-#    print {*STDERR} "\nOperating in $dir\n";
-#    chdir $dir;
-#    pgal_cwd({has_parent => ($dir ne '.')});
-#    chdir $absdir;
-# } ## end foreach my $dir (get_subdirectories...
+#---------------------------------------------------------------------------
+#  Main Functions
+#---------------------------------------------------------------------------
 
-sub get_subdirectories {
-   return '.' unless $config{recursive};
-   return File::Find::Rule->directory()->in('.');
-}
+sub traverse {
+   my ($directory, $dont_regenerate) = @_;
+   my $previous_directory = getcwd();
+   chdir $directory;
+   ### now in: getcwd()
 
-sub pgal_cwd_ {
-   my $params = shift;
+   my %captions = get_captions($config{caption_file});
 
-   my %pconfig = load_previous_config();
-   #spoil_previous_config();
+   foreach my $subdir (@{$captions{subalbums}}) {
 
-   @pconfig{qw( thumb_height scaled_height )} = (0, 0) if $config{force};
+      # Set url
+      $subdir->{url} =
+        File::Spec->catfile($subdir->{directory}, $config{index_product});
 
-   my @images = get_image_list();
-   iterate(\&load_image_info, 'Loading infos', @images);
-   iterate(sub { generate_scaled(shift, 'thumb', \%pconfig) },
-      'Generating thumbnails', @images);
-   iterate(sub { generate_scaled(shift, 'scaled', \%pconfig) },
-      'Generating scaled images', @images);
+      # Assess captions for subalbums
+      my $subcaptions =
+        traverse($subdir->{directory}, !$config{recursive});
+      $subdir->{captions} = $subcaptions;
 
-   my @subalbum_images = get_subalbum_list();
-   iterate(\&load_image_info, 'Loading infos', @subalbum_images);
-   iterate(
-      sub { generate_scaled(shift, 'subthumb', \%pconfig) },
-      'Generating subalbums thumbnails',
-      @subalbum_images
-   );
+      # Establish representative
+      my $preferred = get_preferred($subcaptions);
+      $subdir->{file} =
+        File::Spec->catdir($subdir->{directory}, $preferred->{file});
+   } ## end foreach my $subdir (@{$captions...
 
-   print {*STDERR} "Generating index page... ";
-   generate_index($params, \@images, \@subalbum_images);
-   print {*STDERR} "done\n";
+   # Here, I traversed the whole sub-tree
+   print {*STDERR} "\nWorking in $directory\n";
+   pgal_cwd(\%captions) unless $dont_regenerate;
 
-   print {*STDERR} "Generating index page... ";
-   generate_pages(@images);
-   print {*STDERR} "done\n";
-
-   print {*STDERR} "Ensuring css and tile files... ";
-   ensure_file($config{css},  $config{master_css});
-   ensure_file($config{tile}, $config{master_tile});
-   print {*STDERR} "done\n";
-
-   print {*STDERR} "Saving configuration for future... ";
-   save_new_config(\%config);
-   print {*STDERR} "done\n";
-} ## end sub pgal_cwd_
-
-sub ensure_file {
-   my ($file, $master) = @_;
-   return if -e $file;
-   File::Copy::copy(File::Spec->catfile(where_am_i(), $master), $file);
-   return;
-} ## end sub ensure_file
-
-sub iterate {
-   my $method  = shift;
-   my $message = shift;
-   my $pbar    =
-     Term::ProgressBar->new(
-      {name => $message, count => scalar @_, remove => 1});
-   my $counter = 0;
-   foreach my $image (@_) {
-      $method->($image);
-      $pbar->update(++$counter);
-   }
-   print {*STDERR} "$message... done\n";
-   return;
-} ## end sub iterate
-
-sub load_image_info {
-   my ($image) = @_;
-   my $magick  = Image::Magick->new();
-   my $idx     = 0;
-   $image->{id} = ++$idx;
-   $image->{url} = sprintf $config{slide_product}, $idx;
-   @{$image}{qw( width height size format )} =
-     $magick->Ping($image->{file});
-
-   my $caption_addition = '';
-   if ($config{caption_dimensions}) {
-      $caption_addition .= $image->{width} . 'x' . $image->{height};
-   }
-   if ($config{caption_size}) {
-      $caption_addition .= ', ' if $caption_addition;
-      $caption_addition .= $image->{size} . ' bytes';
-   }
-   $image->{caption_addition} .= $caption_addition;
-} ## end sub load_image_info
-
-sub page_generator {
-   my @images = @_;
-   my $template = get_template(@config{qw( slide_template slide_master )});
-   my $tt       = Template->new();
-   return sub {
-      my $i = shift;
-      return $tt->process(
-         \$template,
-         {
-            config    => \%config,
-            previous  => $images[$i - 1],
-            this      => $images[$i],
-            following => $images[($i + 1) % @images],
-            images    => \@images,
-            index     => {url => $config{index_product}},
-            title     => $images[$i]{file},
-         },
-         $images[$i]{url}
-      );
-   }
-}
-
-sub generate_pages {
-   my @images = @_;
-   #### generate_pages images: @images
-
-   my $template = get_template(@config{qw( slide_template slide_master )});
-   my $tt       = Template->new();
-
-   for my $i (0 .. $#images) {
-      $tt->process(
-         \$template,
-         {
-            config    => \%config,
-            previous  => $images[$i - 1],
-            this      => $images[$i],
-            following => $images[($i + 1) % @images],
-            images    => \@images,
-            index     => {url => $config{index_product}},
-            title     => $images[$i]{file},
-         },
-         $images[$i]{url}
-      );
-   } ## end for my $i (0 .. $#images)
-} ## end sub generate_pages
-
-sub generate_index {
-   my ($data) = @_;
-   my $template = get_template(@config{qw( index_template index_master )});
-   my $tt       = Template->new();
-   $tt->process(
-      \$template,
-      {
-         config    => \%config,
-         %$data
-      },
-      $config{index_product}
-     )
-     || die $tt->error();
-} ## end sub generate_index
-
-sub get_template {
-   my ($filename, $master) = @_;
-   return slurp $filename if -e $filename;
-   my $template = slurp(File::Spec->catfile(where_am_i(), $master));
-   write_file $filename, $template;
-   return $template;
-} ## end sub get_template
-
-sub generate_scaled {
-   my ($image, $type, $pconfig) = @_;
-
-   # Some handy constants, set defaults to whole image
-   my $wname = $type . '_width';
-   my $hname = $type . '_height';
-   @{$image}{($wname, $hname, $type)} = @{$image}{qw( width height file )};
-   return unless $config{$hname};
-
-   # Ok, we actually have to cope with a different file
-   $image->{$type} = $config{$type . '_prefix'} . basename($image->{file});
-
-   # Establish new sizes
-   my $nh = $config{$hname};
-   my $nw = int($image->{width} * $nh / $image->{height});
-   @{$image}{($wname, $hname)} = ($nw, $nh);
-
-   # Return immediately if a previous version "should" be already present
-   return
-     if defined $pconfig->{$hname}
-     && $pconfig->{$hname} == $config{$hname}
-     && -e $image->{$type};
-
-   # Here we have to actually load the image, scale it and save to the
-   # scaled version file
-   my $retval;
-   my $magick = Image::Magick->new();
-   $retval = $magick->Read($image->{file}) and die $retval;
-   $retval = $magick->Resize(width => $nw, height => $nh) and die $retval;
-   $retval = $magick->Write($image->{$type}) and die $retval;
-
-   return 1;
-} ## end sub generate_scaled
-
-sub get_subalbum_list {
-   return map {
-      chdir $_;
-      my $rep;
-      if (my @images = get_image_list()) {
-         if (exists $images[0]->{separator}) {    # From caption
-            for my $image (@images) {
-               next unless $image->{separator} eq 'xxxx';
-               $rep = $image;
-               last;
-            }
-         } ## end if (exists $images[0]->...
-         $rep = $images[rand @images] unless defined $rep;
-         $rep->{file}         = File::Spec->catfile($_, $rep->{file});
-         $rep->{subalbum_dir} = $_;
-         $rep->{caption}      = $_;
-         $rep->{subalbum_url} =
-           File::Spec->catfile($_, $config{index_product});
-      } ## end if (my @images = get_image_list...
-      chdir '..';
-      defined $rep ? $rep : ();
-     }
-     grep { $_ ne '.' }
-     File::Find::Rule->directory()->maxdepth(1)->in('.');
-} ## end sub get_subalbum_list
-
-sub get_image_list {
-   my @filelist;
-   if ($config{caption_use} && -e $config{caption_file}) {
-      @filelist = map {
-         my ($file, $separator, $caption) = /\A
-            (\S+) # File name, must start at the beginning of line
-            \s+   # ehr, couldn't be different :)
-            ( ---- | xxxx ) # separator, x marks the choice...
-            \s* (.*?) \s*  # optional caption, trimmed
-            \z/msx;
-         {
-            file      => $file,
-            separator => $separator,
-            caption   => $caption,
-         }
-        } grep { /\A [^#] \S* \s+ (?: ---- | xxxx )/msx }
-        slurp $config{caption_file};
-   } ## end if ($config{caption_use...
-   else {
-      opendir my $dh, '.';
-      @filelist = map { {file => $_, caption => ''} }
-        grep { /$config{image_filename}/ }
-        sort readdir $dh;
-      save_captions(@filelist) if $config{caption_use};
-   } ## end else [ if ($config{caption_use...
-   return @filelist;
-} ## end sub get_image_list
-
-sub save_captions {
-   open my $fh, '>', $config{caption_file};
-   print {$fh} << 'END_OF_HEADER';
-# Put your captions here, after the '----'. Leave the '-----' where they are.
-# Every line that starts with a space or a '#' is a comment. You'd better
-# use '#'. You can comment out images or change the order, if you want.
-
-END_OF_HEADER
-   print {$fh} "$_->{file} ---- $_->{caption}\n" foreach @_;
-   return;
-} ## end sub save_captions
-
-sub where_am_i {
-   return $config{pgal_dir};
-   return dirname($0);
-}
-
-sub load_previous_config {
-   return unless -e $config{history};
-   return %{retrieve $config{history}};
-}
-
-sub spoil_previous_config {
-   save_new_config({});
-}
-
-sub save_new_config {
-   return nstore(shift, $config{history});
-}
+   # Step back, and return captions' tree so far
+   chdir $previous_directory;
+   return %captions if wantarray;
+   return \%captions;
+} ## end sub traverse
 
 sub pgal_cwd {
    my ($captions) = @_;
@@ -399,7 +161,6 @@ sub pgal_cwd {
 
    ### captions: $captions
 
-
    # Generate index page
    print {*STDERR} "Generating index page... ";
    generate_index($captions);
@@ -417,149 +178,9 @@ sub pgal_cwd {
    print {*STDERR} "done\n";
 } ## end sub pgal_cwd
 
-sub get_preferred {
-   my ($captions) = @_;
-   return $captions->{preferred} ||= do {
-      my @elements =
-        map { @{$captions->{$_} || []} } qw( images videos subalbums );
-      $elements[rand @elements];
-   };
-} ## end sub get_preferred
-
-sub traverse {
-   my ($directory, $dont_regenerate) = @_;
-   my $previous_directory = getcwd();
-   chdir $directory;
-   ### now in: getcwd()
-
-   my %captions = get_captions($config{caption_file});
-
-      foreach my $subdir (@{$captions{subalbums}}) {
-         # Set url
-         $subdir->{url} = File::Spec->catfile($subdir->{directory},
-            $config{index_product});
-
-         # Assess captions for subalbums
-         my $subcaptions = traverse($subdir->{directory}, ! $config{recursive});
-         $subdir->{captions} = $subcaptions;
-
-         # Establish representative
-         my $preferred = get_preferred($subcaptions);
-         $subdir->{file} =
-           File::Spec->catdir($subdir->{directory}, $preferred->{file});
-      } ## end foreach my $subdir (@{$captions...
-
-   # Here, I traversed the whole sub-tree
-   print {*STDERR} "\nWorking in $directory\n";
-   pgal_cwd(\%captions) unless $dont_regenerate;
-
-   # Step back, and return captions' tree so far
-   chdir $previous_directory;
-   return %captions if wantarray;
-   return \%captions;
-} ## end sub traverse
-
-sub get_captions {
-   my ($filename) = @_;
-   return load_captions($filename) if -e $filename;
-   return create_captions($filename);
-}
-
-sub load_captions {
-   my ($filename) = @_;
-   open my $fh, '<', $filename;
-
-   my %captions = (filename => $filename, directory => dirname($filename));
-   my $accepting = 'images';
-   while (<$fh>) {
-      next if /\A \s* \#/mxs;
-      if (/\A\s* Title: \s* (.*?) \s*\z/imxs) {
-         $captions{title} = $1;
-      }
-      elsif (/\A\s* ( images | videos | subalbums ) : \s*\z/imxs) {
-         $accepting = lc($1);
-      }
-      elsif (
-         /\A\s*
-              (.+)                 # file name, no spaces please
-              \s+ ( ---- | xxxx )  # separator, marks preferred
-              \s* (.*?) \s*        # trimmed caption
-              \z/mxs
-        )
-      {
-         my $item = create_item($accepting, $1, $2 eq 'xxxx', $3);
-         push @{$captions{$accepting}}, $item;
-         $captions{preferred} = $item if $item->{is_preferred};
-      } ## end elsif (/\A\s* )
-
-   } ## end while (<$fh>)
-   close $fh;
-
-   return %captions if wantarray;
-   return \%captions;
-} ## end sub load_captions
-
-sub create_item {
-   my ($type, $file, $is_preferred, $caption) = @_;
-   return {
-      ($type eq 'subalbums' ? 'directory' : 'file') => $file,
-      resource => $file,
-      is_preferred => $is_preferred,
-      caption      => $caption,
-   };
-} ## end sub create_item
-
-sub create_captions {
-   my ($filename) = @_;
-
-   # Captions file assumed to live with images
-   my (@images, @videos, @subdirs);
-   my %captions = (title => 'Images in album');
-   opendir my $dh, dirname($filename);
-   for my $file (readdir $dh) {
-      next if $file eq '.' || $file eq '..';
-      my $type_of_stuff =
-          -d $file ? 'subalbums'
-        : $file =~ /$config{image_filename}/ ? 'images'
-        : $file =~ /$config{video_filename}/ ? 'videos'
-        : next;
-      push @{$captions{$type_of_stuff}},
-        create_item($type_of_stuff, $file, 0, '');
-   } ## end for my $file (readdir $dh)
-   closedir $dh;
-
-   open my $fh, '>', $filename;
-
-   print {$fh} <<'END_OF_CAPTION_PREAMBLE';
-# pgal captions file
-#
-# Put all your captions here, it's simple. You have separate sections for
-# all the stuff, add at your will. If you reorder stuff inside sections,
-# well... they'll be reordered in the output page as well. You can
-# eliminate or comment out images/videos/subalbums to avoid them.
-#
-# Title will be set as title for the album.
-#
-# Put your captions after the '----'. Leave the '-----' where they are,
-# except if you want to mark the album's preferred item, that will be
-# used by parent albums. In this case, use 'xxxx' instead of '----'.
-#
-# Good work!
-
-END_OF_CAPTION_PREAMBLE
-   print {$fh} "Title: $captions{title}\n\n";
-
-   for my $type_of_stuff (qw( images videos subalbums )) {
-      print {$fh} "\n$type_of_stuff:\n";
-      print {$fh} "\t$_->{resource} ---- \n" 
-         foreach @{$captions{$type_of_stuff}};
-   }
-
-   close $fh;
-
-   return %captions if wantarray;
-   return \%captions;
-} ## end sub create_captions
+#---------------------------------------------------------------------------
+#  Image handling
+#---------------------------------------------------------------------------
 
 sub image_info_loader {    # Returns a callback to load image info
    my $magick = Image::Magick->new();
@@ -579,14 +200,6 @@ sub image_slide_assigner {
      }
 } ## end sub image_slide_assigner
 
-sub is_newer {
-   my ($product, $original) = @_;
-   my $ptime = (stat $product)[9];
-   my $otime = (stat $original)[9];
-   return $ptime >= $otime;
-   return 1;
-} ## end sub is_newer
-
 sub image_scaler {
    my ($type, $pconfig) = @_;
    my $hname = $type . '_height';
@@ -602,8 +215,13 @@ sub image_scaler {
       return unless $config{$hname};
 
       # Ok, we actually have to cope with a different file
-      $image->{$type}{file} =
-        $config{$type . '_prefix'} . basename($image->{file});
+      my $prefix = $config{$type . '_prefix'};
+      if (ref $prefix) {
+         no strict 'refs';
+         my ($sub, @params) = @$prefix;
+         $prefix = $sub->(@params);
+      }
+      $image->{$type}{file} = $prefix . basename($image->{file});
 
       # Establish new size (new height is equal for all, see above
       my $new_w = int($image->{width} * $new_h / $image->{height});
@@ -629,6 +247,240 @@ sub image_scaler {
       return 1;
      } ## end sub
 } ## end sub image_scaler
+
+#---------------------------------------------------------------------------
+#  Page generation
+#---------------------------------------------------------------------------
+
+sub generate_index {
+   my ($data)   = @_;
+   my $template = get_template(@config{qw( index_template index_master )});
+   my $tt       = Template->new();
+   $tt->process(
+      \$template,
+      {
+         config => \%config,
+         %$data
+      },
+      $config{index_product}
+     )
+     || die $tt->error();
+} ## end sub generate_index
+
+sub page_generator {
+   my @images   = @_;
+   my $template = get_template(@config{qw( slide_template slide_master )});
+   my $tt       = Template->new();
+   return sub {
+      my $i = shift;
+      return $tt->process(
+         \$template,
+         {
+            config    => \%config,
+            previous  => $images[$i - 1],
+            this      => $images[$i],
+            following => $images[($i + 1) % @images],
+            images    => \@images,
+            index     => {url => $config{index_product}},
+            title     => $images[$i]{file},
+         },
+         $images[$i]{url}
+      );
+     } ## end sub
+} ## end sub page_generator
+
+sub get_template {
+   my ($filename, $master) = @_;
+   return slurp $filename if -e $filename;
+   my $template = slurp(File::Spec->catfile(where_am_i(), $master));
+   write_file $filename, $template;
+   return $template;
+} ## end sub get_template
+
+#---------------------------------------------------------------------------
+#  Configuration management
+#---------------------------------------------------------------------------
+
+sub load_previous_config {
+   return unless -e $config{history};
+   return %{retrieve $config{history}};
+}
+
+sub spoil_previous_config {
+   save_new_config({});
+}
+
+sub save_new_config {
+   return nstore(shift, $config{history});
+}
+
+#---------------------------------------------------------------------------
+#  Captions file management
+#---------------------------------------------------------------------------
+
+sub get_captions {
+   my ($filename) = @_;
+   return generate_captions_hash($filename) unless $config{caption_use};
+   return load_captions($filename) if -e $filename;
+   return create_captions($filename);
+} ## end sub get_captions
+
+sub load_captions {
+   my ($filename) = @_;
+   open my $fh, '<', $filename;
+
+   my %captions = (filename => $filename, directory => dirname($filename));
+   my $accepting = 'images';
+   while (<$fh>) {
+      next if /\A \s* \#/mxs;
+      if (/\A\s* Title: \s* (.*?) \s*\z/imxs) {
+         $captions{title} = $1;
+      }
+      elsif (/\A\s* ( images | videos | subalbums ) : \s*\z/imxs) {
+         $accepting = lc($1);
+      }
+      elsif (
+         /\A\s*
+              (.+)                 # file name, no spaces please
+              \s+ ( ---- | xxxx )  # separator, marks preferred
+              \s* (.*?) \s*        # trimmed caption
+              \z/mxs
+        )
+      {
+         my $item = create_caption_item($accepting, $1, $2 eq 'xxxx', $3);
+         push @{$captions{$accepting}}, $item;
+         $captions{preferred} = $item if $item->{is_preferred};
+      } ## end elsif (/\A\s* )
+
+   } ## end while (<$fh>)
+   close $fh;
+
+   return %captions if wantarray;
+   return \%captions;
+} ## end sub load_captions
+
+sub generate_captions_hash {
+   my ($filename) = @_;
+
+   # Captions file assumed to live with images
+   my (@images, @videos, @subdirs);
+   my %captions = ();
+   opendir my $dh, dirname($filename);
+   for my $file (readdir $dh) {
+      next if $file eq '.' || $file eq '..';
+      my $type_of_stuff =
+          -d $file ? 'subalbums'
+        : $file =~ /$config{image_filename}/ ? 'images'
+        : $file =~ /$config{video_filename}/ ? 'videos'
+        : next;
+      push @{$captions{$type_of_stuff}},
+        create_caption_item($type_of_stuff, $file, 0, '');
+   } ## end for my $file (readdir $dh)
+   closedir $dh;
+   return %captions if wantarray;
+   return \%captions;
+} ## end sub generate_captions_hash
+
+sub create_captions {
+   my ($filename) = @_;
+
+   my %captions = generate_captions_hash($filename);
+   open my $fh, '>', $filename;
+
+   print {$fh} <<'END_OF_CAPTION_PREAMBLE';
+# pgal captions file
+#
+# Put all your captions here, it's simple. You have separate sections for
+# all the stuff, add at your will. If you reorder stuff inside sections,
+# well... they'll be reordered in the output page as well. You can
+# eliminate or comment out images/videos/subalbums to avoid them.
+#
+# Title will be set as title for the album.
+#
+# Put your captions after the '----'. Leave the '-----' where they are,
+# except if you want to mark the album's preferred item, that will be
+# used by parent albums. In this case, use 'xxxx' instead of '----'.
+#
+# Good work!
+
+END_OF_CAPTION_PREAMBLE
+   print {$fh} "Title: $captions{title}\n\n";
+
+   for my $type_of_stuff (qw( images videos subalbums )) {
+      print {$fh} "\n$type_of_stuff:\n";
+      print {$fh} "\t$_->{resource} ---- \n"
+        foreach @{$captions{$type_of_stuff}};
+   }
+
+   close $fh;
+
+   return %captions if wantarray;
+   return \%captions;
+} ## end sub create_captions
+
+sub create_caption_item {
+   my ($type, $file, $is_preferred, $caption) = @_;
+   return {
+      ($type eq 'subalbums' ? 'directory' : 'file') => $file,
+      resource     => $file,
+      is_preferred => $is_preferred,
+      caption      => $caption,
+   };
+} ## end sub create_caption_item
+
+#---------------------------------------------------------------------------
+#  Support functions
+#---------------------------------------------------------------------------
+
+sub counter_prefix {
+   my ($prefix, $counter_ref) = @_;
+   return $prefix . ++${$counter_ref} . '_';
+}
+
+sub iterate {
+   my $method  = shift;
+   my $message = shift;
+   my $pbar    =
+     Term::ProgressBar->new(
+      {name => $message, count => scalar @_, remove => 1});
+   my $counter = 0;
+   foreach my $image (@_) {
+      $method->($image);
+      $pbar->update(++$counter);
+   }
+   print {*STDERR} "$message... done\n";
+   return;
+} ## end sub iterate
+
+sub is_newer {
+   my ($product, $original) = @_;
+   my $ptime = (stat $product)[9];
+   my $otime = (stat $original)[9];
+   return $ptime >= $otime;
+   return 1;
+} ## end sub is_newer
+
+sub ensure_file {
+   my ($file, $master) = @_;
+   return if -e $file;
+   File::Copy::copy(File::Spec->catfile(where_am_i(), $master), $file);
+   return;
+} ## end sub ensure_file
+
+sub where_am_i {
+   return $config{pgal_dir};
+   return dirname($0);
+}
+
+sub get_preferred {
+   my ($captions) = @_;
+   return $captions->{preferred} ||= do {
+      my @elements =
+        map { @{$captions->{$_} || []} } qw( images videos subalbums );
+      $elements[rand @elements];
+   };
+} ## end sub get_preferred
+
 __END__
 
 =head1 NAME
