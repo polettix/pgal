@@ -1,0 +1,49 @@
+[%
+   DEFAULT title = 'Index of images...';
+   DEFAULT images_in_row = 3;
+%]
+
+<html>
+<head>
+   <meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+   <link rel="stylesheet" type="text/css" href="pgal.css">
+   <title>[% title %]</title>
+</head>
+<body>
+   <h1>[% title %]</h1>
+   <table>
+   [% 
+      WHILE images.size > 0 ;
+         PROCESS photo_line line = images.splice(0, images_in_row) ;
+      END ;
+   %]
+   </table>
+</body>
+</html>
+
+[% BLOCK photo_line %]
+<tr>
+[% FOREACH image = line %]
+[% 
+   IF image.caption ;
+      caption = image.caption ;
+   ELSE ;
+      caption = image.file ;
+   END
+%]
+   <td style="text-align: center">
+      <a href="[% image.url %]"
+      ><img src="[% image.thumb %]" style="border-width: 0" alt="[% caption %]" title="[% caption %]" width="[% image.thumb_width %]" height="[% image.thumb_height %]"></a>
+      [% IF config.caption_in_index %]
+      <br/>
+         [% 
+            GET caption | html ;
+            IF image.caption_addition ;
+               GET "<br />($image.caption_addition)";
+            END ;
+         %]
+      [% END %]
+   </td>
+[% END %]
+</tr>
+[% END %]
