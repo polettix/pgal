@@ -1,6 +1,6 @@
 [%
    DEFAULT title = 'Index of images...';
-   DEFAULT images_in_row = 3;
+   DEFAULT images_in_row = 5;
    DEFAULT reel = 1;
    DEFAULT cellpadding = 3;
 %]
