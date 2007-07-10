@@ -250,11 +250,26 @@ sub video_thumbnailer {
       $dirname .= $$;
       mkdir $dirname or die "mkdir(): $OS_ERROR";
 
-      system { $config{mplayer} } $config{mplayer},
-         '-nosound',
-         '-vo' => "jpeg:outdir=$dirname",
-         '-frames' => 2,
-         $video->{file};
+      my $pid = fork();
+      die "fork(): $OS_ERROR" unless defined $pid;
+      if ($pid) { # parent, wait for child to come back
+         my $deceased = wait();
+         my $ecode = $CHILD_ERROR;
+         die "who the hell was $deceased? I was waiting for $pid"
+            unless $deceased == $pid;
+         die "something wrong happened" if ($ecode >> 8);
+      }
+      else {
+         close STDIN;
+         close STDOUT;
+         close STDERR;
+         exec { $config{mplayer} } $config{mplayer},
+            '-nosound',
+            '-vo' => "jpeg:outdir=$dirname",
+            '-frames' => 2,
+            $video->{file};
+         die "exec(): $OS_ERROR";
+      }
       
       _scale_image(catfile($dirname, '00000001.jpg'),
          $video->{$type}{file}, 0, 0, 0, $new_h);
