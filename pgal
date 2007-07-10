@@ -13,13 +13,15 @@ use Image::Magick;
 use Fatal qw( open chdir opendir );
 use File::Slurp qw( slurp write_file );
 use File::Spec;
+use File::Spec::Functions qw( catfile );
 use File::Copy;
 use Term::ProgressBar;
 use Data::Dumper;
 use File::Find::Rule;
 use Cwd;
+use English qw( -no_match_vars );
 
-use version; my $VERSION = qv('0.0.1');
+use version; my $VERSION = qv('0.0.2');
 
 my %config = (
    history        => 'history',
@@ -35,6 +37,9 @@ my %config = (
 
    scaled_heigth => 0,
    scaled_prefix => '.slide_',
+
+   videothumb_height => 120,
+   videothumb_prefix => '.video_',
 
    pgal_dir => '/home/poletti/sviluppo/perl/pgal',
 
@@ -56,6 +61,8 @@ my %config = (
    caption_dimensions => 0,
    caption_size       => 0,
    caption_in_index   => 0,
+
+   mplayer => '/usr/bin/mplayer',
 );
 GetOptions(
    \%config,
@@ -66,8 +73,10 @@ GetOptions(
 
    'thumb_height|thumb-height|y=i',
    'scaled_height|scaled-heigth|bigy|Y=i',
+   'videothumb_height|video-thumb-height|vy|V=i',
    'subthumb_height|subalbum-height|suby|S=i',
-   'force|f',
+   'force|f!',
+   'no-scaled|N!',
 
    'recursive|recurse|r',
    'regenerate|regen|R',
@@ -140,7 +149,7 @@ sub pgal_cwd {
    my ($captions) = @_;
 
    my %pconfig = load_previous_config();
-   spoil_previous_config();
+   #spoil_previous_config();
 
    # Work on local images
    my $images = $captions->{images};
@@ -149,9 +158,13 @@ sub pgal_cwd {
    iterate(image_scaler('thumb', \%pconfig),
       'Generating thumbnails', @$images);
    iterate(image_scaler('scaled', \%pconfig),
-      'Generating scaled images', @$images);
+      'Generating scaled images', @$images) unless $config{'no-scaled'};
 
    # Work on videos - TODO
+   my $videos = $captions->{videos};
+   #iterate(image_info_loader(), 'Loading infos', @$videos);
+   iterate(video_thumbnailer('videothumb', \%pconfig), 
+      'Generating video thumbnails', @$videos);
 
    # Work on subalbums
    my $subalbums = $captions->{subalbums};
@@ -191,6 +204,12 @@ sub image_info_loader {    # Returns a callback to load image info
      }
 } ## end sub image_info_loader
 
+sub _width_height {
+   my %image = ( file => shift );
+   image_info_loader()->(\%image);
+   return @image{qw( width height )};
+}
+
 sub image_slide_assigner {
    my $idx = 0;
    return sub {
@@ -200,10 +219,74 @@ sub image_slide_assigner {
      }
 } ## end sub image_slide_assigner
 
+sub video_thumbnailer {
+   my ($type, $pconfig) = @_;
+   my $hname = $type . '_height';
+   my $new_h = $config{$hname};
+   my $prefix = $config{$type . '_prefix'};
+   ### video prefix: $prefix
+   
+   return sub {
+      my $video = shift;
+      return unless -f $video->{file};
+
+      if (ref $prefix) {
+         no strict 'refs';
+         my ($sub, @params) = @$prefix;
+         $prefix = $sub->(@params);
+      }
+      
+      ($video->{$type}{file} = $prefix . basename($video->{file}))
+         =~ s/(?: mov | avi | mpg)\z/jpg/mxs;
+      return
+        if defined $pconfig->{$hname}
+        && $pconfig->{$hname} == $new_h
+        && -e $video->{$type}{file}
+        && !$config{force};
+
+      # Directory to invoke mplayer and extract the frame
+      (my $dirname = $prefix . basename($video->{file}))
+         =~ s/[^\w.-]//g;
+      $dirname .= $$;
+      mkdir $dirname or die "mkdir(): $OS_ERROR";
+
+      system { $config{mplayer} } $config{mplayer},
+         '-nosound',
+         '-vo' => "jpeg:outdir=$dirname",
+         '-frames' => 2,
+         $video->{file};
+      
+      _scale_image(catfile($dirname, '00000001.jpg'),
+         $video->{$type}{file}, 0, 0, 0, $new_h);
+      
+      unlink(catfile($dirname, $_)) for qw( 00000001.jpg 00000002.jpg );
+      rmdir $dirname or die "rmdir(): $OS_ERROR";
+   };
+}
+
+sub _scale_image {
+   my ($input, $output, $iw, $ih, $ow, $oh) = @_;
+
+   if (! ($iw || $ow)) {
+      ($iw, $ih) = _width_height($input) unless $iw;
+      $ow = int($iw * $oh / $ih);
+   }
+   
+   my $retval;
+   my $magick = Image::Magick->new();
+   $retval = $magick->Read($input) and die $retval;
+   $retval = $magick->Resize(width => $ow, height => $oh)
+     and die $retval;
+   $retval = $magick->Write($output) and die $retval;
+
+   return;
+}
+
 sub image_scaler {
    my ($type, $pconfig) = @_;
    my $hname = $type . '_height';
    my $new_h = $config{$hname};
+   my $prefix = $config{$type . '_prefix'};
 
    return sub {    # Saves scaled image in current directory
       my $image = shift;
@@ -215,7 +298,6 @@ sub image_scaler {
       return unless $config{$hname};
 
       # Ok, we actually have to cope with a different file
-      my $prefix = $config{$type . '_prefix'};
       if (ref $prefix) {
          no strict 'refs';
          my ($sub, @params) = @$prefix;
@@ -237,13 +319,8 @@ sub image_scaler {
 
       # Here we have to actually load the image, scale it and save to the
       # scaled version file
-      my $retval;
-      my $magick = Image::Magick->new();
-      $retval = $magick->Read($image->{file}) and die $retval;
-      $retval = $magick->Resize(width => $new_w, height => $new_h)
-        and die $retval;
-      $retval = $magick->Write($image->{$type}{file}) and die $retval;
-
+      _scale_image($image->{file}, $image->{$type}{file}, 0, 0, 
+                   $new_w, $new_h);
       return 1;
      } ## end sub
 } ## end sub image_scaler
@@ -404,7 +481,8 @@ sub create_captions {
 # Good work!
 
 END_OF_CAPTION_PREAMBLE
-   print {$fh} "Title: $captions{title}\n\n";
+   my $title = $captions{title} || '';
+   print {$fh} "Title: $title\n\n";
 
    for my $type_of_stuff (qw( images videos subalbums )) {
       print {$fh} "\n$type_of_stuff:\n";
@@ -506,8 +584,8 @@ See version at beginning of script, variable $VERSION.
 
    pgal [--usage] [--help] [--man] [--version] [-c|--use-captions]
         [-y|--thumb-height] [--bigy|--scaled-height] [-f|--force]
-        [-a|--full-captions] [-ad|--caption-dimensions]
-        [-as|--caption-size] [-u|--caption-in-index]
+        [-a|--full-captions] [--ad|--caption-dimensions]
+        [--as|--caption-size] [-u|--caption-in-index]
 
   
 =head1 DESCRIPTION
@@ -556,13 +634,15 @@ it's being funny.
 Add both image dimensions (width x height) and file size in caption.
 Implies both -ad and -as.
 
-=item -ad | --caption-dimensions
+=item --ad | --caption-dimensions
 
-Add image dimensions (width x height) in caption.
+Add image dimensions (width x height) in caption. NOTE: this option always
+requires double hyphen.
 
-=item -as | --caption-size
+=item --as | --caption-size
 
-Add image file size in caption.
+Add image file size in caption. NOTE: this option always requires double
+hyphen.
 
 =item --bigy <height>
 

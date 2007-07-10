@@ -29,6 +29,20 @@
    [% END %]
 
    [% 
+      IF videos.size() ;
+      SET stuff = videos.slice(0) ;
+   %]
+   <h2>Videos</h2>
+   <div class="center">
+   [% 
+      WHILE stuff.size > 0 ;
+         PROCESS video_line line = stuff.splice(0, images_in_row) ;
+      END ;
+   %]
+   </div>
+   [% END %]
+
+   [% 
       IF subalbums.size() ;
       SET stuff = subalbums.slice(0) ;
    %]
@@ -65,8 +79,72 @@
 %]
    <td class="thumb">
       <a href="[% image.url %]"><img src="[% image.thumb.file %]"
-         style="border-width: 0" alt="[% caption %]" title="[% caption %]" 
+         style="border-width: 0"
+         alt="[% caption | html %]" 
+         title="[% caption | html %]" 
          width="[% image.thumb.width %]" height="[% image.thumb.height %]"
+      ></a>
+   </td>
+[% END %]
+<td class="thumb">&nbsp;</td>
+</tr>
+[% IF reel %]
+<tr><td class="tiled" height="21" colspan="[% columns %]"></td></tr>
+[% END %]
+[% IF config.caption_in_index %]
+<tr>
+<td class="small">&nbsp;</td>
+[% FOREACH image = line %]
+[% 
+   IF image.caption ;
+      caption = image.caption ;
+   ELSE ;
+      caption = image.file ;
+   END
+%]
+   <td class="small">
+         [% 
+            GET caption | html ;
+            IF image.caption_addition ;
+               GET "<br />($image.caption_addition)";
+            END ;
+         %]
+   </td>
+[% END %]
+<td class="small">&nbsp;</td>
+
+</tr>
+[% END %]
+</table>
+<br />
+[% END %]
+
+
+[% 
+   BLOCK video_line ;
+   SET columns = 2 + line.size
+%]
+<table border=0 cellspacing=0 cellpadding=[% cellpadding %]>
+[% IF reel %]
+<tr><td class="tiled" height="21" colspan="[% columns %]"></td></tr>
+[% END %]
+<tr>
+<td class="thumb">&nbsp;</td>
+[% FOREACH image = line %]
+[% 
+   IF image.caption ;
+      caption = image.caption ;
+   ELSE ;
+      caption = image.file ;
+   END
+%]
+   <td class="thumb">
+      <a href="[% image.file %]"><img src="[% image.videothumb.file %]"
+         style="border-width: 0" 
+         alt="[% caption | html %]" 
+         title="[% caption | html %]" 
+         width="[% image.videothumb.width %]"
+         height="[% image.videothumb.height %]"
       ></a>
    </td>
 [% END %]
@@ -126,7 +204,9 @@
 %]
    <td class="thumb">
       <a href="[% image.url %]"><img src="[% image.subthumb.file %]"
-         style="border-width: 0" alt="[% caption %]" title="[% caption %]" 
+         style="border-width: 0" 
+         alt="[% caption | html %]" 
+         title="[% caption | html %]" 
          width="[% image.subthumb.width %]" height="[% image.subthumb.height %]"
       ></a>
    </td>
