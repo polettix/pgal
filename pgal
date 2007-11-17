@@ -29,17 +29,20 @@ my %config = (
    image_filename => qr/(?ixsm:\A [^.] .* \. (?: jpg | png | gif ) \z)/,
    video_filename => qr/(?ixsm:\A [^.] .* \. (?: mov | avi | mpg ) \z)/,
 
-   subthumb_height => 120,
+   subthumb_height => 150,
    subthumb_prefix => [ qw( counter_prefix .subthumb_ ) , do{ \my $x}],
 
-   thumb_height => 120,
+   thumb_height => 150,
    thumb_prefix => '.thumb_',
 
-   scaled_heigth => 0,
+   scaled_height => 480,
    scaled_prefix => '.slide_',
 
-   videothumb_height => 120,
+   videothumb_height => 150,
    videothumb_prefix => '.video_',
+   videothumb_font => '/usr/share/fonts/truetype/freefont/FreeSerif.ttf',
+   videothumb_font => '/home/poletti/tmp/Ravie.ttf',
+   videothumb_color => 'red',
 
    pgal_dir => '/home/poletti/sviluppo/perl/pgal',
 
@@ -62,7 +65,10 @@ my %config = (
    caption_size       => 0,
    caption_in_index   => 0,
 
+   default_title => '',
+
    mplayer => '/usr/bin/mplayer',
+   #mplayer => '/path/usr/bin/mplayer',
 );
 GetOptions(
    \%config,
@@ -86,6 +92,12 @@ GetOptions(
    'caption_dimensions|caption-dimensions|ad',
    'caption_size|caption-size|as',
    'caption_in_index|caption-in-index|u',
+
+   'title|t=s',
+   'default_title|default_title|T=s',
+   
+   'mplayer=s',
+   'verbose-mplayer!',
 );
 pod2usage("$0 $VERSION") if $config{version};
 pod2usage(-verbose => 99, -sections => 'USAGE') if $config{usage};
@@ -151,20 +163,18 @@ sub pgal_cwd {
    my %pconfig = load_previous_config();
    #spoil_previous_config();
 
+
    # Work on local images
    my $images = $captions->{images};
    iterate(image_info_loader(),    'Loading infos',    @$images);
    iterate(image_slide_assigner(), 'Assigning slides', @$images);
+   my $videos = $captions->{videos}; # Pre-scale on videos...
+   iterate(video_thumbnailer('videothumb', \%pconfig), 
+      'Generating video thumbnails', @$videos);
    iterate(image_scaler('thumb', \%pconfig),
       'Generating thumbnails', @$images);
    iterate(image_scaler('scaled', \%pconfig),
       'Generating scaled images', @$images) unless $config{'no-scaled'};
-
-   # Work on videos - TODO
-   my $videos = $captions->{videos};
-   #iterate(image_info_loader(), 'Loading infos', @$videos);
-   iterate(video_thumbnailer('videothumb', \%pconfig), 
-      'Generating video thumbnails', @$videos);
 
    # Work on subalbums
    my $subalbums = $captions->{subalbums};
@@ -219,36 +229,14 @@ sub image_slide_assigner {
      }
 } ## end sub image_slide_assigner
 
-sub video_thumbnailer {
-   my ($type, $pconfig) = @_;
-   my $hname = $type . '_height';
-   my $new_h = $config{$hname};
-   my $prefix = $config{$type . '_prefix'};
-   ### video prefix: $prefix
-   
-   return sub {
-      my $video = shift;
-      return unless -f $video->{file};
-
-      if (ref $prefix) {
-         no strict 'refs';
-         my ($sub, @params) = @$prefix;
-         $prefix = $sub->(@params);
-      }
-      
-      ($video->{$type}{file} = $prefix . basename($video->{file}))
-         =~ s/(?: mov | avi | mpg)\z/jpg/mxs;
-      return
-        if defined $pconfig->{$hname}
-        && $pconfig->{$hname} == $new_h
-        && -e $video->{$type}{file}
-        && !$config{force};
+sub generate_mplayer_thumbnail {
+   my ($video, $thumbfile, $new_h) = @_;
 
       # Directory to invoke mplayer and extract the frame
-      (my $dirname = $prefix . basename($video->{file}))
-         =~ s/[^\w.-]//g;
-      $dirname .= $$;
+      (my $dirname = $thumbfile . $$ . '_dir') =~ s/[^\w.-]//g;
+      my $pre_umask = umask(0);
       mkdir $dirname or die "mkdir(): $OS_ERROR";
+      umask($pre_umask);
 
       my $pid = fork();
       die "fork(): $OS_ERROR" unless defined $pid;
@@ -260,9 +248,13 @@ sub video_thumbnailer {
          die "something wrong happened" if ($ecode >> 8);
       }
       else {
-         close STDIN;
-         close STDOUT;
-         close STDERR;
+         if (! $config{'verbose-mplayer'}) {
+            close STDIN;
+            close STDOUT;
+            close STDERR;
+            open STDOUT, '>', '/dev/null';
+            open STDERR, '>', '/dev/null';
+         }
          exec { $config{mplayer} } $config{mplayer},
             '-nosound',
             '-vo' => "jpeg:outdir=$dirname",
@@ -272,10 +264,80 @@ sub video_thumbnailer {
       }
       
       _scale_image(catfile($dirname, '00000001.jpg'),
-         $video->{$type}{file}, 0, 0, 0, $new_h);
+         $thumbfile, 0, 0, 0, $new_h);
       
       unlink(catfile($dirname, $_)) for qw( 00000001.jpg 00000002.jpg );
       rmdir $dirname or die "rmdir(): $OS_ERROR";
+
+   return;
+}
+
+sub generate_video_thumbnail {
+   my ($video, $thumbfile, $new_h) = @_;
+
+   my $image = Image::Magick->new();
+   my $new_w = int( 4 * $new_h / 3 );
+   $image->Set(size => $new_w . 'x' . $new_h);
+   $image->ReadImage('xc:white');
+
+   my %parameters = (
+     text => basename($video->{file}),
+     font => $config{videothumb_font},
+     gravity => 'Center',
+     fill => $config{videothumb_color},
+     # rotate => -30,
+   );
+
+   (undef, undef, undef, undef, my ($w, $h)) =
+      $image->QueryFontMetrics(
+         %parameters,
+         pointsize => 100,
+      );
+
+   my ($rw, $rh) = ($new_w / $w, $new_h / $h);
+   my $pointsize = 10 * int(9 * (($rw > $rh) ? $rh : $rw));
+   
+   $image->Annotate(
+      %parameters,
+      pointsize => $pointsize,
+   );
+   $image->Write($thumbfile);
+
+   return;
+}
+
+sub video_thumbnailer {
+   my ($type, $pconfig) = @_;
+   my $hname = $type . '_height';
+   my $new_h = $config{$hname};
+   my $prefix = $config{$type . '_prefix'};
+   ### video prefix: $prefix
+   
+   return sub {
+      my $video = shift;
+      return unless -f $video->{file};
+
+      my $theprefix = $prefix;
+      if (ref $prefix) {
+         no strict 'refs';
+         my ($sub, @params) = @$prefix;
+         $theprefix = $sub->(@params);
+      }
+      
+      ($video->{$type}{file} = $theprefix . basename($video->{file}))
+         =~ s/(?: mov | avi | mpg)\z/jpg/mxs;
+      return
+        if defined $pconfig->{$hname}
+        && $pconfig->{$hname} == $new_h
+        && -e $video->{$type}{file}
+        && !$config{force};
+
+      if (-e $config{mplayer}) {
+         generate_mplayer_thumbnail($video, $video->{$type}{file}, $new_h);
+      }
+      else {
+         generate_video_thumbnail($video, $video->{$type}{file}, $new_h);
+      }
    };
 }
 
@@ -313,12 +375,13 @@ sub image_scaler {
       return unless $config{$hname};
 
       # Ok, we actually have to cope with a different file
+      my $theprefix = $prefix;
       if (ref $prefix) {
          no strict 'refs';
          my ($sub, @params) = @$prefix;
-         $prefix = $sub->(@params);
+         $theprefix = $sub->(@params);
       }
-      $image->{$type}{file} = $prefix . basename($image->{file});
+      $image->{$type}{file} = $theprefix . basename($image->{file});
 
       # Establish new size (new height is equal for all, see above
       my $new_w = int($image->{width} * $new_h / $image->{height});
@@ -496,7 +559,7 @@ sub create_captions {
 # Good work!
 
 END_OF_CAPTION_PREAMBLE
-   my $title = $captions{title} || '';
+   my $title = $config{title} || $captions{title} || $config{default_title};
    print {$fh} "Title: $title\n\n";
 
    for my $type_of_stuff (qw( images videos subalbums )) {
@@ -701,7 +764,7 @@ print the version of the script.
 =item -y <height> | --thumb-height=<height>
 
 Set height of thumbnails. Scaling preserves original files and aspect
-ratio. Defaults to 120.
+ratio. Defaults to 150.
 
 =back
 
