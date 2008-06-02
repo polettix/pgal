@@ -9,12 +9,12 @@
 <div class="center">
 <table bgcolor="#ffffff" cellspacing="0" cellpadding="4">
 <tr><td class="slide">
-<a href="[% this.file %]"
-><img src="[% this.scaled.file %]" 
+[% IF ! config.no_original %]<a href="[% this.file %]"
+>[% END %]<img src="[% this.scaled.file %]" 
    width="[% this.scaled.width %]" height="[% this.scaled.height %]"
    alt="[% this.file %]" title="[% this.file %]"
    style="border-width: 0"
-></a>
+>[% IF ! config.no_original %]</a>[% END %]
 </td></tr>
 </table>
 </div>
