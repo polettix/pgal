@@ -78,20 +78,20 @@ GetOptions(
    'version',
 
    'thumb_height|thumb-height|y=i',
-   'scaled_height|scaled-heigth|bigy|Y=i',
+   'scaled_height|scaled-height|bigy|Y=i',
    'videothumb_height|video-thumb-height|vy|V=i',
    'subthumb_height|subalbum-height|suby|S=i',
    'force|f!',
    'no-scaled|N!',
 
-   'recursive|recurse|r',
-   'regenerate|regen|R',
+   'recursive|recurse|r!',
+   'regenerate|regen|R!',
 
-   'caption_use|use-captions|c',
-   'caption_full|full-captions|a',
-   'caption_dimensions|caption-dimensions|ad',
-   'caption_size|caption-size|as',
-   'caption_in_index|caption-in-index|u',
+   'caption_use|use-captions|c!',
+   'caption_full|full-captions|a!',
+   'caption_dimensions|caption-dimensions|ad!',
+   'caption_size|caption-size|as!',
+   'caption_in_index|caption-in-index|u!',
 
    'title|t=s',
    'default_title|default_title|T=s',
@@ -189,7 +189,8 @@ sub pgal_cwd {
    generate_index($captions);
    print {*STDERR} "done\n";
 
-   iterate(page_generator(@$images), 'Generating pages', 0 .. $#{$images});
+   iterate(page_generator(@$images), 'Generating pages', 0 .. $#{$images})
+      unless $config{'no-scaled'};
 
    print {*STDERR} "Ensuring css and tile files... ";
    ensure_file($config{css},  $config{master_css});
@@ -722,11 +723,6 @@ requires double hyphen.
 Add image file size in caption. NOTE: this option always requires double
 hyphen.
 
-=item --bigy <height>
-
-Set height of images inside slide pages. Scaling preserves original
-files and aspect ratio.
-
 =item -c | --use-capions
 
 Use the .captions file to load image captions. The file itself is used
@@ -748,23 +744,67 @@ the options and some examples from the synopsis.
 
 print out the full documentation for the script.
 
+=item --mplayer
+
+set path to mplayer, for thumbnail extraction from video files. Defaults
+to C</usr/bin/mplayer>.
+
+=item --recursive | --recurse | -r
+
+recurse subdirectories to create sub-albums. Note that subdirectories are
+always looked into for any sign of something suitable to insert in
+the album as a subalbum, even if the subalbum generation does not happen.
+Generally, the absence of a C<.captions> file in the subdirectory makes
+it unavailable as a subalbum.
+
+=item --regenerate | --regen | -R
+
+reload previous configuration and add configuration on the command line to
+that.
+
+=item -S | --suby | --subthumb-height
+
+set height of thumbnails for sub-albums. Defaults to 150 pixel.
+
+=item -t | --title
+
+set album's title.
+
+=item -T | --default-title
+
+set album's default title, i.e. the title that will be used if a title
+isn't available.
+
 =item -u | --caption-in-index
 
-Put captions into the index file (normally they only live in the slide
+put captions into the index file (normally they only live in the slide
 pages).
 
 =item --usage
 
 print a concise usage line and exit.
 
+=item --verbose-mplayer
+
+sometimes C<mplayer> just refuses to work when its output is thrown away.
+
 =item --version
 
 print the version of the script.
 
-=item -y <height> | --thumb-height=<height>
+=item -V | --vy | --video-thumb-height
 
-Set height of thumbnails. Scaling preserves original files and aspect
-ratio. Defaults to 150.
+set height of thumbnails for video files. Defaults to 150 pixel.
+
+=item -y | --thumb-height
+
+set height of thumbnails. Scaling preserves original files and aspect
+ratio. Defaults to 150 pixel.
+
+=item -Y | --bigy | --scaled-height
+
+set height of scaled images in slides. Scaling preservers original
+files and aspec ratio. Defaults to 480 pixel.
 
 =back
 
