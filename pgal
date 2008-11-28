@@ -103,6 +103,8 @@ GetOptions(
    'mplayer=s',
    'verbose-mplayer!',
    'use-embedded-thumbnails|e!',
+
+   'quick|q!',
 );
 pod2usage("$0 $VERSION") if $config{version};
 pod2usage(-verbose => 99, -sections => 'USAGE') if $config{usage};
@@ -110,8 +112,16 @@ pod2usage(-verbose => 99, -sections => 'USAGE|SYNOPSIS|OPTIONS')
   if $config{help};
 pod2usage(-verbose => 2) if $config{man};
 
+if ($config{quick}) {
+   $config{'no-scaled'}               = 1;
+   $config{caption_full}              = 1;
+   $config{caption_in_index}          = 1;
+   $config{'use-embedded-thumbnails'} = 1;
+} ## end if ($config{quick})
+
 if ($config{caption_full}) {
-   $config{caption_dimensions} = $config{caption_size} = 1;
+   $config{caption_dimensions} = 1;
+   $config{caption_size} = 1;
 }
 
 # Honor regeneration request
