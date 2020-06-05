@@ -9,6 +9,7 @@ use Getopt::Long qw( :config gnu_getopt );
 use File::Basename qw( dirname basename );
 use Template;
 use Storable qw( retrieve nstore );
+use YAML qw( LoadFile DumpFile );
 use Image::Magick;
 use Fatal qw( open chdir opendir );
 use File::Slurp qw( slurp write_file );
@@ -526,6 +527,7 @@ sub get_template {
 
 sub load_previous_config {
    return unless -e $config{history};
+   return %{LoadFile($config{history})};
    return %{retrieve $config{history}};
 }
 
@@ -534,6 +536,7 @@ sub spoil_previous_config {
 }
 
 sub save_new_config {
+   return DumpFile($config{history}, shift);
    return nstore(shift, $config{history});
 }
 
