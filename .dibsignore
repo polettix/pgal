@@ -1,3 +1,4 @@
 /cpanfile
 /cpanfile.snapshot
-/.git/
+/.git
+/.dibsignore
