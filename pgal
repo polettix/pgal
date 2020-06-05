@@ -4,18 +4,11 @@ use warnings;
 use Carp;
 use Pod::Usage qw( pod2usage );
 use Getopt::Long qw( :config gnu_getopt );
-
-#use Smart::Comments '###', '####';
-use File::Basename qw( dirname basename );
 use Template;
-use Storable qw( retrieve nstore );
 use YAML qw( LoadFile DumpFile );
 use Image::Magick;
-use Fatal qw( open chdir opendir );
-use File::Slurp qw( slurp write_file );
-use File::Spec;
-use File::Spec::Functions qw( catfile );
-use File::Copy;
+use autodie;
+use Path::Tiny;
 use Term::ProgressBar;
 use Data::Dumper;
 use File::Find::Rule;
@@ -44,11 +37,10 @@ my %config = (
 
    videothumb_height => 150,
    videothumb_prefix => '.video_',
-   videothumb_font   => '/usr/share/fonts/truetype/freefont/FreeSerif.ttf',
-   videothumb_font   => '/home/poletti/tmp/Ravie.ttf',
+   videothumb_font   => '/usr/share/fonts/TTF/FreeSerif.ttf',
    videothumb_color  => 'red',
 
-   pgal_dir => '/home/poletti/sviluppo/perl/pgal',
+   pgal_dir => path(__FILE__)->parent->absolute->stringify,
 
    index_template => '.index_template',
    index_master   => 'index_template',
@@ -72,8 +64,6 @@ my %config = (
    default_title => '',
 
    mplayer => '/usr/bin/mplayer',
-
-   #mplayer => '/path/usr/bin/mplayer',
 );
 GetOptions(
    \%config,
@@ -149,8 +139,8 @@ sub traverse {
    foreach my $subdir (@{$captions{subalbums}}) {
 
       # Set url
-      $subdir->{url} =
-        File::Spec->catfile($subdir->{directory}, $config{index_product});
+      $subdir->{url} = path($subdir->{directory})
+         ->child($config{index_product})->stringify;
 
       # Assess captions for subalbums
       my $subcaptions =
@@ -159,8 +149,8 @@ sub traverse {
 
       # Establish representative
       my $preferred = get_preferred($subcaptions);
-      $subdir->{file} =
-        File::Spec->catdir($subdir->{directory}, $preferred->{file});
+      $subdir->{file} = path($subdir->{directory})
+         ->child($preferred->{file})->stringify;
    } ## end foreach my $subdir (@{$captions...
 
    # Here, I traversed the whole sub-tree
@@ -258,10 +248,7 @@ sub generate_mplayer_thumbnail {
    my ($video, $thumbfile, $new_h) = @_;
 
    # Directory to invoke mplayer and extract the frame
-   (my $dirname = $thumbfile . $$ . '_dir') =~ s/[^\w.-]//g;
-   my $pre_umask = umask(0);
-   mkdir $dirname or die "mkdir(): $OS_ERROR";
-   umask($pre_umask);
+   my $dir = Path::Tiny->tempdir();
 
    my $pid = fork();
    die "fork(): $OS_ERROR" unless defined $pid;
@@ -281,17 +268,14 @@ sub generate_mplayer_thumbnail {
          open STDERR, '>', '/dev/null';
       } ## end if (!$config{'verbose-mplayer'...
       exec {$config{mplayer}} $config{mplayer}, '-nosound',
-        '-vo'     => "jpeg:outdir=$dirname",
+        '-vo'     => "jpeg:outdir=$dir",
         '-frames' => 2,
         $video->{file};
       die "exec(): $OS_ERROR";
    } ## end else [ if ($pid)
 
-   _scale_image(catfile($dirname, '00000001.jpg'),
+   _scale_image($dir->child('00000001.jpg'),
       $thumbfile, 0, 0, 0, $new_h);
-
-   unlink(catfile($dirname, $_)) for qw( 00000001.jpg 00000002.jpg );
-   rmdir $dirname or die "rmdir(): $OS_ERROR";
 
    return;
 } ## end sub generate_mplayer_thumbnail
@@ -305,7 +289,7 @@ sub generate_video_thumbnail {
    $image->ReadImage('xc:white');
 
    my %parameters = (
-      text    => basename($video->{file}),
+      text    => path($video->{file})->basename,
       font    => $config{videothumb_font},
       gravity => 'Center',
       fill    => $config{videothumb_color},
@@ -343,7 +327,7 @@ sub video_thumbnailer {
          $theprefix = $sub->(@params);
       }
 
-      ($video->{$type}{file} = $theprefix . basename($video->{file})) =~
+      ($video->{$type}{file} = $theprefix . path($video->{file})->basename) =~
         s/(?: mov | avi | mpg)\z/jpg/mxs;
       return
         if defined $pconfig->{$hname}
@@ -400,7 +384,7 @@ sub image_scaler {
          my ($sub, @params) = @$prefix;
          $theprefix = $sub->(@params);
       }
-      $image->{$type}{file} = $theprefix . basename($image->{file});
+      $image->{$type}{file} = $theprefix . path($image->{file})->basename;
 
       # Establish new size (new height is equal for all, see above
       my $new_w = int($image->{width} * $new_h / $image->{height});
@@ -441,7 +425,7 @@ sub embedded_extractor {
          my ($sub, @params) = @$prefix;
          $theprefix = $sub->(@params);
       }
-      $image->{$type}{file} = $theprefix . basename($image->{file});
+      $image->{$type}{file} = $theprefix . path($image->{file})->basename;
 
       # Establish new size (new height is equal for all, see above
 
@@ -460,8 +444,7 @@ sub embedded_extractor {
          $et->ExtractInfo($image->{file});
          my $thumbnail = $et->GetValue($tag)
            or die "file '$image->{file}' has no embedded $tag";
-         write_file($image->{$type}{file}, $$thumbnail)
-           or die "could not write '$image->{$type}{file}: $OS_ERROR";
+         path($image->{$type}{file})->spew($$thumbnail);
       } ## end if (!(-e $image->{$type...
 
       # Grab info on the thumbnail anyway
@@ -479,7 +462,7 @@ sub embedded_extractor {
 sub generate_index {
    my ($data)   = @_;
    my $template = get_template(@config{qw( index_template index_master )});
-   my $tt       = Template->new();
+   my $tt       = Template->new() or die Template->error . "\n";
    $config{no_scaled} = 1 if $config{'no-scaled'};
    $tt->process(
       \$template,
@@ -515,9 +498,11 @@ sub page_generator {
 
 sub get_template {
    my ($filename, $master) = @_;
-   return slurp $filename if -e $filename;
-   my $template = slurp(File::Spec->catfile(where_am_i(), $master));
-   write_file $filename, $template;
+   my $file = path($filename);
+   return $file->slurp if -e $filename;
+
+   my $template = path(where_am_i())->child($master)->slurp;
+   $file->spew($template);
    return $template;
 } ## end sub get_template
 
@@ -528,7 +513,6 @@ sub get_template {
 sub load_previous_config {
    return unless -e $config{history};
    return %{LoadFile($config{history})};
-   return %{retrieve $config{history}};
 }
 
 sub spoil_previous_config {
@@ -537,7 +521,6 @@ sub spoil_previous_config {
 
 sub save_new_config {
    return DumpFile($config{history}, shift);
-   return nstore(shift, $config{history});
 }
 
 #---------------------------------------------------------------------------
@@ -555,7 +538,7 @@ sub load_captions {
    my ($filename) = @_;
    open my $fh, '<', $filename;
 
-   my %captions = (filename => $filename, directory => dirname($filename));
+   my %captions = (filename => $filename, directory => path($filename)->parent->stringify);
    my $accepting = 'images';
    while (<$fh>) {
       next if /\A \s* \#/mxs;
@@ -591,7 +574,7 @@ sub generate_captions_hash {
    # Captions file assumed to live with images
    my (@images, @videos, @subdirs);
    my %captions = ();
-   opendir my $dh, dirname($filename);
+   opendir my $dh, path($filename)->parent->stringify;
    for my $file (readdir $dh) {
       next if $file eq '.' || $file eq '..';
       my $type_of_stuff =
@@ -692,14 +675,11 @@ sub is_newer {
 sub ensure_file {
    my ($file, $master) = @_;
    return if -e $file;
-   File::Copy::copy(File::Spec->catfile(where_am_i(), $master), $file);
+   path(where_am_i(), $master)->copy($file);
    return;
 } ## end sub ensure_file
 
-sub where_am_i {
-   return $config{pgal_dir};
-   return dirname($0);
-}
+sub where_am_i { return $config{pgal_dir} }
 
 sub get_preferred {
    my ($captions) = @_;
@@ -927,23 +907,11 @@ for getting this beautiful documentation;
 
 guess why?
 
-=item Smart::Comments
-
-for debugging (and feedback) purposes;
-
 =item Data::Dumper
 
 for debugging;
 
-=item File::Basename
-
-=item File::Spec
-
-=item File::Slurp
-
-=item File::Copy
-
-=item Fatal
+=item autodie
 
 =item Storable
 
