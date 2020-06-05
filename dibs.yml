@@ -1,0 +1,84 @@
+---
+name: pgal
+
+variables:
+   - &base     alpine:3.11
+   - &username 'urist'
+   - &appsrc   {path_src: '.'}
+   - &appcache {path_cache: 'perl-app'}
+   - &appdir   '/app'
+   - &workdir  '/mnt'
+
+packs:
+   basic:
+      type:   git
+      origin: https://github.com/polettix/dibspack-basic.git
+
+
+actions:
+   default: [build, bundle]
+
+   builder:
+      - from: *base
+      - user
+      - extends: prereqs
+        args:
+           - build-base
+           - perl
+           - perl-dev
+           - imagemagick
+           - imagemagick-perlmagick
+      - tags: 'pgal-builder:latest'
+
+   build:
+      - from: 'pgal-builder:latest'
+      - pack: basic
+        path: perl/build
+        user: *username
+      - name: copy needed artifacts in cache
+        pack: basic
+        path: install/with-dibsignore
+        args: ['--src', *appsrc,
+               '--dst', *appcache]
+        user: root
+
+   bundler:
+      - from: *base
+      - user
+      - extends: prereqs
+        args:
+           - '--suexec'
+           - '--profilexec'
+           - perl
+           - imagemagick
+           - imagemagick-perlmagick
+           - mplayer
+           - ttf-freefont
+           - libjpeg-turbo-utils
+           - exiftool
+           - su-exec
+      - tags: 'pgal-bundler:latest'
+
+   bundle:
+      - from: 'pgal-bundler:latest'
+      - name: move artifacts in place
+        pack: basic
+        path: install/plain-copy
+        args: [*appcache, *appdir]
+        user: root
+        commit:
+            entrypoint: [ '/suexec', '-r', *workdir, '--', '/profilexec', '/app/pgal' ]
+            cmd: [ '-cr' ]
+            workdir: *workdir
+      - tags: 'pgal:0.1'
+
+   user:
+      pack: basic
+      path: wrapexec/suexec
+      args: ['-u', *username, '-h', *appdir]
+      user: root
+
+   prereqs:
+      pack: basic
+      path: package/apk
+      user: root
